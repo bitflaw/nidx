@@ -24,7 +24,10 @@ add_executable (
 
 target_link_libraries (nidx
   PRIVATE
+  SQLiteCpp
   sqlite3
+  pthread
+  # dl
 )
 
 target_include_directories (nidx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
