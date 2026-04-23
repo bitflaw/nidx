@@ -14,7 +14,6 @@
         buildInputs = with pkgs; [
           cmake
           clang-tools
-          bear
 
           sqlite
           sqlitecpp
