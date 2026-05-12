@@ -23,7 +23,7 @@ struct JsonValue
 
 inline std::string quote (std::string str) { return "\"" + str + "\""; }
 
-inline void builder(JsonValue json_value, std::string& stringified)
+inline void serialize(JsonValue json_value, std::string& stringified)
 {
   auto visitor = overloaded {
     [&](std::monostate)
@@ -54,7 +54,7 @@ inline void builder(JsonValue json_value, std::string& stringified)
       {
         if (count > 0) stringified.append(",");
         stringified.append(quote(key) + ":");
-        builder(value, stringified);
+        serialize(value, stringified);
         count++;
       }
       stringified.append("}");
@@ -66,7 +66,7 @@ inline void builder(JsonValue json_value, std::string& stringified)
       for (JsonValue& val : json_arr)
       {
         if (count > 0) stringified.append(",");
-        builder(val, stringified);
+        serialize(val, stringified);
         count++;
       }
       stringified.append("]");

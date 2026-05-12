@@ -11,10 +11,12 @@
     in
     {
       devShells.${system}.default = pkgs.mkShell {
-        buildInputs = with pkgs; [
+        nativeBuildInputs = with pkgs; [
           cmake
           clang-tools
-
+          gf
+        ];
+        buildInputs = with pkgs; [
           sqlite
           sqlitecpp
         ];

@@ -1,4 +1,4 @@
-#include <JsonBuilder.hpp>
+#include <JsonSerializer.hpp>
 #include <SQLiteCpp/SQLiteCpp.h>
 #include <cstdlib>
 #include <filesystem>
@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <functional>
+#include <fstream>
 
 #define BOLD_WHITE "\033[1;97m"
 #define GREEN "\033[32m"
@@ -20,12 +21,14 @@
 namespace fs = std::filesystem;
 namespace sjod = simdjson::ondemand;
 
-struct Version {
+struct Version
+{
   static constexpr u32 major = 0;
   static constexpr u32 minor = 0;
   static constexpr u32 patch = 0;
 
-  static std::string string() {
+  static std::string string()
+  {
     return std::format("{}.{}.{}", major, minor, patch);
   }
 };
@@ -35,9 +38,13 @@ fs::path get_data_dir();
 void parse_pkgs(bool unstable = false);
 void get_pkgs(bool get_unstable = false);
 void query_pkgs(std::vector<std::string> &target_pkgs, std::string &pkg_set,
-                bool enable_exact_matching = false, bool use_unstable = false);
-namespace lsp {
-struct Zone {
+                bool enable_exact_matching = false, bool use_unstable = false,
+                bool case_sensitive_search = false
+                );
+namespace lsp
+{
+struct Zone
+{
   i32 start {-1}, end {-1};
 };
 
@@ -54,18 +61,21 @@ struct FileLoc
 std::vector<std::string> split(std::string const &str, std::string const &delim,
                                std::size_t times = INT_MAX);
 i32 parse_header(std::string header);
+
+void start_lsp();
 void handle_lsp_init(auto &json_obj);
 void handle_lsp_file_open(auto &json_obj);
 void handle_lsp_file_change(auto &json_obj);
 void handle_lsp_completion(auto &json_obj);
 void handle_lsp_hover(auto &json_obj);
-void start_lsp();
+
 } // namespace lsp
 
 const fs::path DATA_DIR = get_data_dir();
 const fs::path TMP_DIR = fs::temp_directory_path();
 const fs::path stable_db = DATA_DIR / "stable.sqlite3.db";
 const fs::path unstable_db = DATA_DIR / "unstable.sqlite3.db";
+const fs::path lsp_log_file = DATA_DIR / "lsp.log";
 
 i32 main(i32 argc, char *argv[])
 {
@@ -79,66 +89,71 @@ i32 main(i32 argc, char *argv[])
   i32 opt;
 
   bool enable_exact_matching = false;
+  bool case_sensitive_search = false;
   bool use_unstable = false;
-  std::vector<std::string> search_pkgs{};
-  std::string search_pkg_set;
+  std::vector<std::string> search_pkgs {};
+  std::string search_pkg_set {};
 
-  while ((opt = getopt(argc, argv, "hvleuU:p:s:")) != -1)
+  while ((opt = getopt(argc, argv, "hvleuSU:p:s:")) != -1)
   {
     switch (opt)
     {
-    case 'h':
-      usage(argv[0]);
-      exit(EXIT_SUCCESS);
-    case 'v':
-      std::cout << argv[0] + 2 << " v" << Version::string() << std::endl;
-      exit(EXIT_SUCCESS);
-    case 'l': // lsp mode
-      lsp::start_lsp();
-      exit(EXIT_SUCCESS);
-    case 'U': // update the index
-      if (std::string{optarg} == "unstable")
-      {
-        fs::remove(unstable_db);
-        parse_pkgs(true);
+      case 'h':
+        usage(argv[0]);
         exit(EXIT_SUCCESS);
-      }
-      else if (std::string{optarg} == "stable")
-      {
-        fs::remove(stable_db);
-        parse_pkgs(false);
+      case 'v':
+        std::cout << argv[0] + 2 << " v" << Version::string() << std::endl;
         exit(EXIT_SUCCESS);
-      }
-      else
-      {
+      case 'l':
+        lsp::start_lsp();
+        exit(EXIT_SUCCESS);
+      case 'U':
+        if (std::string{optarg} == "unstable")
+        {
+          fs::remove(unstable_db);
+          parse_pkgs(true);
+          exit(EXIT_SUCCESS);
+        }
+        else if (std::string{optarg} == "stable")
+        {
+          fs::remove(stable_db);
+          parse_pkgs(false);
+          exit(EXIT_SUCCESS);
+        }
+        else
+        {
+          usage(argv[0]);
+          exit(EXIT_FAILURE);
+        }
+      case 'u':
+        if (!fs::exists(unstable_db))
+        {
+          std::cout << "[INFO] FETCHING FROM UNSTABLE...";
+          parse_pkgs(true);
+          std::cout << "[INFO] OK" << std::endl;
+        }
+        use_unstable = true;
+        break;
+      case 'p':
+        search_pkgs.emplace_back(optarg);
+        break;
+      case 's':
+        search_pkg_set = std::string{optarg};
+        break;
+      case 'e':
+        enable_exact_matching = true;
+        break;
+      case 'S':
+        case_sensitive_search = true;
+        break;
+      default:
         usage(argv[0]);
         exit(EXIT_FAILURE);
-      }
-    case 'u': // search the unstable index
-      if (!fs::exists(unstable_db))
-      {
-        std::cout << "FETCHING FROM UNSTABLE..." << std::endl;
-        parse_pkgs(true);
-      }
-      use_unstable = true;
-      break;
-    case 'p': // package(s) to search for
-      search_pkgs.emplace_back(optarg);
-      break;
-    case 's': // pkg-set to search for packages
-      search_pkg_set = std::string{optarg};
-      break;
-    case 'e': // exact matching enabled
-      enable_exact_matching = true;
-      break;
-    default:
-      usage(argv[0]);
-      exit(EXIT_FAILURE);
     }
   }
   for (i32 i = optind; i < argc; i++)
     search_pkgs.emplace_back(argv[i]);
-  query_pkgs(search_pkgs, search_pkg_set, enable_exact_matching, use_unstable);
+  query_pkgs(search_pkgs, search_pkg_set, enable_exact_matching, use_unstable, case_sensitive_search);
 
   exit(EXIT_SUCCESS);
 }
@@ -146,40 +161,41 @@ i32 main(i32 argc, char *argv[])
 void usage(std::string_view pname)
 {
   std::string usage_str =
-      "Usage: {}\n\t [-h help] [-v version] [-l enable lsp-mode] "
-      "[-U {{unstable|stable}} update package index]\n\t [-p package(s)] [-s "
-      "package set for packages]"
-      "[-e enable exact matching]\n\t [-u use unstable to search]";
+      "Usage: {}\n\t [-h help] [-v version] [-l enable lsp-mode] [-p package(s)]\n\t"
+      "[-s package set ] [-S case-sensitive search][-e enable exact matching]\n\t"
+      "[-U {{unstable|stable}} update package index] [-u use unstable to search]\n";
+
   std::cout << std::vformat(usage_str, std::make_format_args(pname))
             << std::endl;
 }
 
 void query_pkgs(std::vector<std::string> &target_pkgs, std::string &pkg_set,
-                bool enable_exact_matching, bool use_unstable
+                bool enable_exact_matching, bool use_unstable, bool case_sensitive_search
                 )
 {
-  std::string partial = "";
-  if (!enable_exact_matching)
+  std::string name_column_to_use {"name"};
+  if (case_sensitive_search) name_column_to_use = "csname";
+
+  std::string partial {};
+  if (enable_exact_matching)
+  {
+    partial += name_column_to_use + " IN (";
+    for (size_t i = 0; i < target_pkgs.size(); i++)
+      partial += (i == 0 ? "?" : ", ?");
+  } else
   {
     partial += "(";
     for (size_t i = 0; i < target_pkgs.size(); i++)
     {
-      partial += "name LIKE ?";
+      partial += name_column_to_use + " LIKE ?";
       if (i < target_pkgs.size() - 1)
         partial += " OR ";
     }
-    partial += ")";
-  } else
-  {
-    partial += "name IN (";
-    for (size_t i = 0; i < target_pkgs.size(); i++)
-      partial += (i == 0 ? "?" : ", ?");
-    partial += ")";
   }
-  if (!pkg_set.empty())
-    partial += " AND pkg_set LIKE ? ";
+  partial += ")";
+  if (!pkg_set.empty()) partial += " AND set_prefix LIKE ? ";
 
-  std::string query = "SELECT name, version, pkg_set, desc, '{}' as branch"
+  std::string query = "SELECT csname, version, set_prefix, desc, '{}' as branch"
                       " FROM {}pkgs WHERE " +
                       partial;
   std::string ovr = "SELECT * FROM (";
@@ -221,8 +237,8 @@ void query_pkgs(std::vector<std::string> &target_pkgs, std::string &pkg_set,
     }
   if (!pkg_set.empty())
   {
-    stmt.bind(target_pkgs.size() + 1, "%" + pkg_set + "%");
-    stmt.bind((n + 1) + n, "%" + pkg_set + "%");
+    stmt.bind(target_pkgs.size() + 1, pkg_set + "%");
+    stmt.bind((n + 1) + n, pkg_set + "%");
   }
 
   std::string connector = "  \u2570\u2500\u2500\u2500 "; // "  ╰─── ";
@@ -233,22 +249,28 @@ void query_pkgs(std::vector<std::string> &target_pkgs, std::string &pkg_set,
     std::cout << "\n";
     while (stmt.executeStep())
     {
-      //   0     1      2     3    4
-      // name   ver pkg_set desc branch
+      //   0      1       2      3      4
+      // csname  ver  set_pref  desc  branch
       std::string branch = stmt.getColumn(4);
       std::string pkg_col;
       branch[0] == 'S' ? pkg_col = GREEN : pkg_col = YELLOW;
-      std::cout << YELLOW "\u25cf" RESET "  " // ●
+      std::string pkg_set = stmt.getColumn(2);
+      std::string pkg_set_out;
+      pkg_set.empty() ?
+        pkg_set_out = "" :
+        pkg_set_out = DIM " (" + pkg_set + ")" RESET;
+      std::cout << pkg_col + "\u25cf" RESET "  " // ●
                 << pkg_col << stmt.getColumn(0) << RESET << BLUE " v"
-                << stmt.getColumn(1) << RESET << DIM " (" << stmt.getColumn(2)
-                << ")\n" RESET << "   " DIM << connector << RESET
+                << stmt.getColumn(1) << RESET << pkg_set_out
+                << "\n   " DIM << connector << RESET
                 << stmt.getColumn(3) << "\n\n";
       count++;
     }
-    std::cout << count << " RECORDS FOUND." << std::endl;
+    std::string out {count == 1 ? " RECORD" : " RECORDS"};
+    std::cout << count << out + " FOUND." << std::endl;
   } catch (SQLite::Exception &e)
   {
-    std::cerr << "SQLite Exception: " << e.what() << std::endl;
+    std::cerr << e.what() << std::endl;
     exit(EXIT_FAILURE);
   }
 }
@@ -310,11 +332,7 @@ fs::path get_data_dir()
   return data_dir_path;
 }
 
-void lower(std::string &str)
-{
-  for (char &ch : str)
-    ch = std::tolower(ch);
-}
+void lower(std::string &str) { for (char &ch : str) ch = std::tolower(ch); }
 
 void parse_pkgs(bool update_unstable)
 {
@@ -325,14 +343,13 @@ void parse_pkgs(bool update_unstable)
     db_name = unstable_db;
     json_filepath = DATA_DIR / "unstable.json";
   }
-  if (fs::exists(db_name))
-    return;
+  if (fs::exists(db_name)) return;
   update_unstable ? get_pkgs(true) : get_pkgs();
 
   SQLite::Database db{db_name.string(),
                       SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE};
-  db.exec("CREATE TABLE IF NOT EXISTS pkgs (name VARCHAR(255),"
-          "version VARCHAR(15), pkg_set TEXT, desc TEXT)");
+  db.exec("CREATE TABLE IF NOT EXISTS pkgs (name VARCHAR(255), csname VARCHAR(255),"
+          "version VARCHAR(15), set_prefix TEXT, desc TEXT)");
 
   sjod::parser parser;
   auto pkgs = simdjson::padded_string::load(json_filepath.generic_string());
@@ -340,30 +357,43 @@ void parse_pkgs(bool update_unstable)
 
   SQLite::Statement insert_stmt {
       db,
-      "INSERT INTO pkgs (name, version, pkg_set, desc) VALUES (?,?,?,?)"
+      "INSERT INTO pkgs (name, csname, version, set_prefix, desc) VALUES (?,?,?,?,?)"
   };
   SQLite::Transaction txn {db};
   sjod::object pkg_iterable = pkg_doc.get_object();
+  std::string pkg_set_prefix = "legacyPackages.x86_64-linux.";
   for (auto pkg : pkg_iterable)
   {
-    std::string pkg_set = std::string{pkg.unescaped_key().value()};
-    sjod::object value = pkg.value();
-    std::string desc = std::string{value["description"].get_string().value()};
-    std::string version = std::string{value["version"].get_string().value()};
-    std::string pname = std::string{value["pname"].get_string().value()};
-    lower(pname);
+    std::string pkg_set = std::string{pkg.unescaped_key().value()}.substr(pkg_set_prefix.size());;
+    std::string name {};
+    size_t idx = pkg_set.find_last_of('.');
+    if (idx != std::string::npos)
+    {
+      name = pkg_set.substr(idx+1);
+      insert_stmt.bind(4, pkg_set.substr(0, idx));
+    }
+    else
+    {
+      name = pkg_set;
+      insert_stmt.bind(4);
+    }
 
-    insert_stmt.bind(1, pname);
-    insert_stmt.bind(2, version);
-    insert_stmt.bind(3, pkg_set);
-    insert_stmt.bind(4, desc);
+    sjod::object value = pkg.value();
+    std::string desc = std::string {value["description"].get_string().value()};
+    std::string version = std::string {value["version"].get_string().value()};
+
+    insert_stmt.bind(2, name); // case-sensitive name
+    lower(name);
+    insert_stmt.bind(1, name); // case-insensitive name
+    insert_stmt.bind(3, version);
+    insert_stmt.bind(5, desc);
     insert_stmt.exec();
     insert_stmt.reset();
   }
   txn.commit();
 
-  db.exec("CREATE INDEX idx_pname ON pkgs (name)");
-  db.exec("CREATE INDEX idx_pkgset ON pkgs (pkg_set)");
+  db.exec("CREATE INDEX idx_name ON pkgs (name)");
+  db.exec("CREATE INDEX idx_set_pref ON pkgs (set_prefix)");
   db.exec("ANALYZE");
   db.exec("VACUUM");
 
@@ -374,16 +404,6 @@ void parse_pkgs(bool update_unstable)
 
 namespace lsp
 {
-
-// NOTE: LSP spec impl but just for completion for pkgs based on an already
-// existent or easily buildable index
-// 1. initialize
-// WARN: don't need these
-// 2. textDocument/didOpen
-// 3. textDocument/didChange
-// INFO: most important to us, will complete the pkgs.
-// 4. textDocument/completion
-// 5. textDocument/hover.
 
 std::vector<std::string> split(std::string const &str, std::string const &delim,
                                std::size_t times)
@@ -407,9 +427,8 @@ i32 parse_header(std::string header)
 {
   std::string::size_type idx = header.find(':');
   if (idx == std::string::npos)
-    throw std::runtime_error(
-        "[ERROR] while parsing header: Invalid format for header!"
-        );
+    std::cerr<< "[ERROR] while parsing header: Invalid format for header!\n"
+      << std::flush;
   idx++;
 
   return std::stoi(header.substr(idx));
@@ -520,125 +539,157 @@ void start_lsp()
     else if (obj["method"] == "textDocument/didChange")
       handle_lsp_file_change(obj);
     else if (obj["method"] == "textDocument/completion")
-      return;
+      handle_lsp_completion(obj);
     else if (obj["method"] == "textDocument/hover")
       handle_lsp_hover(obj);
     else
       continue;
   }
 }
-// using obj_T = simdjson::simdjson_result<simdjson::fallback::ondemand::object>;
+using obj_T = simdjson::simdjson_result<simdjson::fallback::ondemand::object>;
 
 auto output = [] (JsonObject response_obj, std::string response)
 {
-  builder(JsonValue {response_obj}, response);
+  serialize(JsonValue {response_obj}, response);
   std::cout
       << "Content-Length:" << response.size() << "\r\n\r\n" << response
       << std::flush;
 };
 
+auto send_null_response = [] (std::string id)
+{
+  JsonObject null_response
+  {
+    {"id", JsonValue {id}},
+    {"jsonrpc", JsonValue {"2.0"}},
+    {"result", JsonValue {std::monostate {}}}
+  };
+  std::string response {};
+  output(null_response, response);
+};
+
 void handle_lsp_init(auto &json_obj)
 {
-  JsonObject response_obj {};
-  response_obj.insert({"jsonrpc", JsonValue{"2.0"}});
   auto id = json_obj["id"];
   JsonValue id_value{};
   try
   {
-    id_value = JsonValue{id.get_int64()};
+    id_value = JsonValue{std::to_string(id.get_int64())};
   } catch (const simdjson::simdjson_error&)
   {
     id_value = JsonValue{std::string{id.get_string().value()}};
   }
-  response_obj.insert({"id", id_value});
+  try
+  {
+    JsonObject response_obj {};
+    response_obj.insert({"jsonrpc", JsonValue{"2.0"}});
+    response_obj.insert({"id", id_value});
 
-  JsonObject svr_info {
-      {"name", JsonValue{"nidx"}},
-      {"version", JsonValue{"0.1.0"}},
-  };
-  // JsonObject completion_attrs {
-  //   {"resolveProvider", JsonValue {false}}
-  // };
-  JsonObject capabilities {
-      {"textDocumentSync", JsonValue{2}}, // incremental sync
-      // {"completionProvider", JsonValue {completion_attrs}}
-      {"hoverProvider", JsonValue{true}},
-  };
+    JsonObject svr_info {
+        {"name", JsonValue{"nidx"}},
+        {"version", JsonValue{"0.1.0"}},
+    };
+    JsonObject capabilities {
+        {"textDocumentSync", JsonValue{2}}, // incremental sync
+        {"completionProvider", JsonValue {
+                                           JsonObject{
+                                             {"triggerCharacters", JsonValue{JsonArray {JsonValue{"."}}}},
+                                             {"resolveProvider", JsonValue {false}}
+                                           }
+                                         }
+        },
+        {"hoverProvider", JsonValue{true}},
+    };
 
-  JsonObject result {};
-  result.insert({"capabilities", JsonValue{capabilities}});
-  result.insert({"serverInfo", JsonValue{svr_info}});
+    JsonObject result {};
+    result.insert({"capabilities", JsonValue{capabilities}});
+    result.insert({"serverInfo", JsonValue{svr_info}});
 
-  response_obj.insert({"result", JsonValue{result}});
-  std::string stringified_response{};
-  std::invoke(output, response_obj, stringified_response);
+    response_obj.insert({"result", JsonValue{result}});
+    std::string stringified_response{};
+    std::invoke(output, response_obj, stringified_response);
+  } catch (const std::exception& e)
+  {
+    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    send_null_response(std::get<std::string>(id_value.value));
+  }
 }
 
 void handle_lsp_file_open(auto &json_obj)
 {
-  auto file_params = json_obj["params"]["textDocument"].get_object();
-  std::string_view file_uri = file_params["uri"].get_string();
-  std::string_view src = file_params["text"].get_string();
-  src_lines = split(std::string{src}, "\n");
-  std::vector<std::string> keywords{"buildInputs", "nativeBuildInputs",
-                                    "packages"};
-  scan_for_keywords(std::string{file_uri}, keywords);
+  try
+  {
+    auto file_params = json_obj["params"]["textDocument"].get_object();
+    std::string_view file_uri = file_params["uri"].get_string();
+    std::string_view src = file_params["text"].get_string();
+    src_lines = split(std::string{src}, "\n");
+    std::vector<std::string> keywords{"buildInputs", "nativeBuildInputs",
+                                      "packages"};
+    scan_for_keywords(std::string{file_uri}, keywords);
+  } catch (const std::exception& e)
+  {
+    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+  }
 }
 
 void handle_lsp_file_change(auto &json_obj)
 {
-  auto file_params = json_obj["params"]["textDocument"].get_object();
-  std::string_view file_uri = file_params["uri"].get_string();
-  auto file_changes = json_obj["params"]["contentChanges"].get_array();
-  for (size_t i {0}; i < file_changes.count_elements(); i++)
+  try
   {
-    auto change = file_changes.at(i);
-    if (
-        std::string_view text = change.at(i).find_field("text").value();
-        !text.empty()
-        )
+    auto file_params = json_obj["params"]["textDocument"].get_object();
+    std::string_view file_uri = file_params["uri"].get_string();
+    auto file_changes = json_obj["params"]["contentChanges"].get_array();
+    for (size_t i {0}; i < file_changes.count_elements(); i++)
     {
-      src_lines.clear();
-      src_lines = split(std::string {text}, "\n");
-      std::vector<std::string> keywords{"buildInputs", "nativeBuildInputs",
-                                    "packages"};
-      scan_for_keywords(std::string{file_uri}, keywords);
-      continue;
-    }
-    auto range_obj = change["range"].get_object();
-    FileLoc range {
-      .line_range = {
-        .start = range_obj["start"]["line"].get_int32(),
-        .end = range_obj["end"]["line"].get_int32(),
-      },
-      .char_range = {
-        .start = range_obj["start"]["character"].get_int32(),
-        .end = range_obj["end"]["character"].get_int32(),
-      }
-    };
-    try
-    {
-      std::vector<Zone> kw_zones = file_kw_zones.at(std::string {file_uri});
-      for (Zone& zone : kw_zones)
+      auto change = file_changes.at(i);
+      if (
+          std::string_view text = change.at(i).find_field("text").value();
+          !text.empty()
+          )
       {
-        Zone line_range = range.line_range;
-        bool is_overlapping = (line_range.start <= zone.end) && (line_range.end >= zone.start);
-        if (is_overlapping)
-        {
-          u32 range_length = change["rangeLength"].get_uint32();
-          std::string_view text = change["text"].get_string();
-          perform_changes(range, range_length, text);
-        }
+        src_lines.clear();
+        src_lines = split(std::string {text}, "\n");
+        std::vector<std::string> keywords{"buildInputs", "nativeBuildInputs",
+                                      "packages"};
+        scan_for_keywords(std::string{file_uri}, keywords);
+        continue;
       }
-    } catch (const std::out_of_range&)
-    {
-      continue;
+      auto range_obj = change["range"].get_object();
+      FileLoc range {
+        .line_range = {
+          .start = range_obj["start"]["line"].get_int32(),
+          .end = range_obj["end"]["line"].get_int32(),
+        },
+        .char_range = {
+          .start = range_obj["start"]["character"].get_int32(),
+          .end = range_obj["end"]["character"].get_int32(),
+        }
+      };
+      try
+      {
+        std::vector<Zone> kw_zones = file_kw_zones.at(std::string {file_uri});
+        for (Zone& zone : kw_zones)
+        {
+          Zone line_range = range.line_range;
+          bool is_overlapping = (line_range.start <= zone.end) && (line_range.end >= zone.start);
+          if (is_overlapping)
+          {
+            u32 range_length = change["rangeLength"].get_uint32();
+            std::string_view text = change["text"].get_string();
+            perform_changes(range, range_length, text);
+          }
+        }
+      } catch (const std::out_of_range&)
+      {
+        continue;
+      }
     }
+  } catch (const std::exception& e)
+  {
+    std::cerr << "[ERROR] " <<e.what()<<std::endl;
   }
 }
 
-// void handle_lsp_completion (auto &json_obj)
-// {}
 
 i32 search_right (i32 pos, std::string_view search_line)
 {
@@ -664,7 +715,7 @@ Zone search_for_bounds (i32 search_start_pos, std::string_view search_line)
   };
 }
 
-std::optional<Zone> zone_from_char_pos (std::string_view file_uri, auto &hover_loc)
+std::optional<Zone> zone_from_char_pos (std::string_view file_uri, auto &hover_loc, bool search_both=true, bool left_search=true)
 {
   i32 line = hover_loc["line"].get_int32();
   i32 character = hover_loc["character"].get_int32();
@@ -687,14 +738,120 @@ std::optional<Zone> zone_from_char_pos (std::string_view file_uri, auto &hover_l
   if (!is_in_kw_zone) return std::nullopt;
 
   std::string src_line = src_lines[line];
-  return search_for_bounds(character, src_line);
+
+  if (search_both)
+    return search_for_bounds(character, src_line);
+  else if (left_search)
+    return Zone {
+     .start = search_left (character, src_line),
+       .end = character
+    };
+  else
+   return Zone {
+     .start = character,
+       .end = search_right(character, src_line)
+   };
+}
+
+void handle_lsp_completion (auto &json_obj)
+{
+  std::cerr<<"COMPLETION REQUEST RECEIVED"<<std::flush;
+  auto id = json_obj["id"];
+  JsonValue id_value {};
+  try
+  {
+    id_value = JsonValue{std::to_string(id.get_int64())};
+  } catch (const simdjson::simdjson_error&)
+  {
+    id_value = JsonValue{std::string{id.get_string().value()}};
+  }
+  try
+  {
+    JsonObject response_obj {};
+    std::string stringified {};
+    response_obj.insert({"jsonrpc", JsonValue {"2.0"}});
+    response_obj.insert({"id", id_value});
+
+    auto params = json_obj["params"].get_object();
+    std::string_view file_uri = params["textDocument"]["uri"].get_string();
+    auto cmp_pos = params["position"].get_object();
+    std::optional<Zone> location = zone_from_char_pos(file_uri, cmp_pos, false, true);
+    if (!location.has_value())
+    {
+      // send null response...cmp position is not in any of our zones
+      send_null_response(std::get<std::string>(id_value.value));
+      return;
+    }
+
+    i32 line = cmp_pos["line"].get_int32();
+    std::string src_line = src_lines[line];
+    if (src_line.empty())
+    {
+      response_obj.insert({ "result", JsonValue {std::monostate {}} });
+      std::invoke(output, response_obj, stringified);
+      return;
+    }
+
+    std::string lookup = src_line.substr(location->start, location->end);
+    std::string trimmed_lookup_value;
+    for (u32 i = 0; i < lookup.size(); i++)
+    {
+      if (lookup[i] == '\t' || lookup[i] == ' ') continue;
+      trimmed_lookup_value = lookup.substr(i);
+      break;
+    }
+    std::string sql {"SELECT * FROM pkgs WHERE csname LIKE ?"};
+    std::string pkg_set {};
+    size_t idx = trimmed_lookup_value.find('.');
+    if (idx != std::string::npos)
+    {
+      pkg_set = trimmed_lookup_value.substr(0, idx);
+      sql.append(" AND set_prefix LIKE ?");
+      trimmed_lookup_value = trimmed_lookup_value.substr(idx+1);
+    }
+    sql.append(" LIMIT 15");
+
+    response_obj.insert_or_assign("result", JsonValue {std::monostate {}});
+    SQLite::Database db {stable_db.string(), SQLite::OPEN_READWRITE};
+    SQLite::Statement query {db, sql};
+    query.bind(1, trimmed_lookup_value + '%');
+    if (!pkg_set.empty()) query.bind(2, pkg_set + '%');
+    JsonArray items {};
+    while (query.executeStep())
+    {
+      //   0     1     2       3        4
+      // name  csname ver  set_prefix  desc
+      std::string name =    query.getColumn(1);
+      std::string version = query.getColumn(2);
+      std::string set_pref = query.getColumn(3);
+      std::string desc =    query.getColumn(4);
+      JsonObject item {
+        {"label", JsonValue {name}},
+        {"kind", JsonValue {3}},
+        {"detail", JsonValue {" v" + version + " (" + set_pref + ")"}},
+        {"documentation", JsonValue {desc}},
+      };
+      items.emplace_back (item);
+    }
+
+    if (!items.empty())
+    {
+      JsonObject result {};
+      result.insert({"isIncomplete", JsonValue {false}});
+      result.insert({"items", JsonValue {items}});
+      response_obj.insert_or_assign("result", JsonValue {result});
+    }
+    stringified.clear();
+    std::invoke(output, response_obj, stringified);
+  } catch (const std::exception& e)
+  {
+    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    send_null_response(std::get<std::string>(id_value.value));
+  }
 }
 
 void handle_lsp_hover(auto &json_obj)
 {
-  JsonObject response_obj {};
-  std::string stringified {};
-  response_obj.insert({"jsonrpc", JsonValue {"2.0"}});
   auto id = json_obj["id"];
   JsonValue id_value{};
   try
@@ -704,61 +861,83 @@ void handle_lsp_hover(auto &json_obj)
   {
     id_value = JsonValue{std::string{id.get_string().value()}};
   }
-  response_obj.insert({"id", id_value});
-  std::string_view file_uri= json_obj["params"]["textDocument"]["uri"].get_string();
-  auto hover_loc = json_obj["params"]["position"].get_object();
-  std::optional<Zone> location = zone_from_char_pos (file_uri, hover_loc);
-  if (!location.has_value())
+  try
   {
-    // send null response...hover position is not in any of our zones
-    response_obj.insert({ "result", JsonValue {std::monostate {}} });
+    JsonObject response_obj {};
+    std::string stringified {};
+    response_obj.insert({"jsonrpc", JsonValue {"2.0"}});
+    response_obj.insert({"id", id_value});
+
+    std::string_view file_uri = json_obj["params"]["textDocument"]["uri"].get_string();
+    auto hover_loc = json_obj["params"]["position"].get_object();
+    std::optional<Zone> location = zone_from_char_pos (file_uri, hover_loc);
+    if (!location.has_value())
+    {
+      // send null response...hover position is not in any of our zones
+      send_null_response(std::get<std::string>(id_value.value));
+      return;
+    }
+
+    i32 line = hover_loc["line"].get_int32();
+    std::string src_line = src_lines[line];
+    if (src_line.empty())
+    {
+      send_null_response(std::get<std::string>(id_value.value));
+      return;
+    }
+
+    std::string lookup = src_line.substr(location->start, location->end);
+    std::string trimmed_lookup_value;
+    for (u32 i = 0; i < lookup.size(); i++)
+    {
+      if (lookup[i] == '\t' || lookup[i] == ' ') continue;
+      trimmed_lookup_value = lookup.substr(i);
+      break;
+    }
+
+    size_t idx = trimmed_lookup_value.rfind('.');
+    std::string pkg_set_prefix {};
+    if (idx != std::string::npos)
+    {
+      pkg_set_prefix = trimmed_lookup_value.substr(0, idx);
+      trimmed_lookup_value = trimmed_lookup_value.substr(idx+1);
+    }
+
+    response_obj.insert_or_assign("result", JsonValue {std::monostate {}});
+    SQLite::Database db {stable_db.string(), SQLite::OPEN_READWRITE};
+    std::string sql =  "SELECT * FROM pkgs WHERE csname = ?";
+    if (!pkg_set_prefix.empty()) sql += " AND set_prefix = ?";
+
+    SQLite::Statement query {db, sql};
+    query.bind(1, trimmed_lookup_value);
+    if (query.executeStep())
+    {
+      //   0     1      2       3        4
+      // name  csname  ver  set_prefix  desc
+      std::string name =    query.getColumn(1);
+      std::string version = query.getColumn(2);
+      std::string set_pref = query.getColumn(3);
+      std::string desc =    query.getColumn(4);
+      std::string md = "{} [**v{}**]\n**{}**\n{}";
+      JsonObject result {};
+      if (!set_pref.empty()) set_pref = "(" + set_pref + ")";
+      else set_pref = "(none)";
+      JsonObject contents {
+        {"kind", JsonValue {"markdown"}},
+        {"value", JsonValue {std::vformat(md, std::make_format_args(name, version, set_pref, desc))}}
+      };
+
+      result.insert({"contents", JsonValue {contents}});
+      response_obj.insert_or_assign("result", JsonValue {result});
+    }
+
+    stringified.clear();
     std::invoke(output, response_obj, stringified);
-    return;
-  }
-
-  i32 line = hover_loc["line"].get_int32();
-  std::string src_line = src_lines[line];
-  if (src_line.empty())
+  } catch (const std::exception& e)
   {
-    response_obj.insert({ "result", JsonValue {std::monostate {}} });
-    std::invoke(output, response_obj, stringified);
-    return;
+    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    send_null_response(std::get<std::string>(id_value.value));
   }
-
-  std::string lookup = src_line.substr(location->start, location->end);
-  std::string trimmed_lookup_value;
-  for (u32 i = 0; i < lookup.size(); i++)
-  {
-    if (lookup[i] == '\t' || lookup[i] == ' ') continue;
-    trimmed_lookup_value = lookup.substr(i);
-    break;
-  }
-
-  response_obj.insert_or_assign("result", JsonValue {std::monostate {}});
-  SQLite::Database db {stable_db.string(), SQLite::OPEN_READWRITE};
-  SQLite::Statement query {db, "SELECT * FROM pkgs WHERE name = ?"};
-  query.bind(1, trimmed_lookup_value);
-  if (query.executeStep())
-  {
-    //   0     1      2     3
-    // name   ver pkg_set desc
-    std::string name =    query.getColumn(0);
-    std::string version = query.getColumn(1);
-    std::string pkg_set = query.getColumn(2);
-    std::string desc =    query.getColumn(3);
-    std::string md = "## {} [**v{}**]\n**({})**\n\n{}";
-    JsonObject result {};
-    JsonObject contents {
-      {"kind", JsonValue {"markdown"}},
-      {"value", JsonValue {std::vformat(md, std::make_format_args(name, version, pkg_set, desc))}}
-    };
-
-    result.insert({"contents", JsonValue {contents}});
-    response_obj.insert_or_assign("result", JsonValue {result});
-  }
-
-  stringified.clear();
-  std::invoke(output, response_obj, stringified);
 }
 
 } // namespace lsp
