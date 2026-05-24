@@ -9,7 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <functional>
-#include <fstream>
+// #include <fstream>
 
 #define BOLD_WHITE "\033[1;97m"
 #define GREEN "\033[32m"
@@ -590,7 +590,7 @@ void handle_lsp_init(auto &json_obj)
         {"version", JsonValue{"0.1.0"}},
     };
     JsonObject capabilities {
-        {"textDocumentSync", JsonValue{2}}, // incremental sync
+        {"textDocumentSync", JsonValue{1}}, // full sync
         {"completionProvider", JsonValue {
                                            JsonObject{
                                              {"triggerCharacters", JsonValue{JsonArray {JsonValue{"."}}}},
@@ -610,7 +610,7 @@ void handle_lsp_init(auto &json_obj)
     std::invoke(output, response_obj, stringified_response);
   } catch (const std::exception& e)
   {
-    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    std::cerr << "[INIT ERROR] " <<e.what()<<std::endl;
     send_null_response(std::get<std::string>(id_value.value));
   }
 }
@@ -628,7 +628,7 @@ void handle_lsp_file_open(auto &json_obj)
     scan_for_keywords(std::string{file_uri}, keywords);
   } catch (const std::exception& e)
   {
-    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    std::cerr << "[OPEN ERROR] " <<e.what()<<std::endl;
   }
 }
 
@@ -639,54 +639,17 @@ void handle_lsp_file_change(auto &json_obj)
     auto file_params = json_obj["params"]["textDocument"].get_object();
     std::string_view file_uri = file_params["uri"].get_string();
     auto file_changes = json_obj["params"]["contentChanges"].get_array();
-    for (size_t i {0}; i < file_changes.count_elements(); i++)
-    {
-      auto change = file_changes.at(i);
-      if (
-          std::string_view text = change.at(i).find_field("text").value();
-          !text.empty()
-          )
-      {
-        src_lines.clear();
-        src_lines = split(std::string {text}, "\n");
-        std::vector<std::string> keywords{"buildInputs", "nativeBuildInputs",
-                                      "packages"};
-        scan_for_keywords(std::string{file_uri}, keywords);
-        continue;
-      }
-      auto range_obj = change["range"].get_object();
-      FileLoc range {
-        .line_range = {
-          .start = range_obj["start"]["line"].get_int32(),
-          .end = range_obj["end"]["line"].get_int32(),
-        },
-        .char_range = {
-          .start = range_obj["start"]["character"].get_int32(),
-          .end = range_obj["end"]["character"].get_int32(),
-        }
-      };
-      try
-      {
-        std::vector<Zone> kw_zones = file_kw_zones.at(std::string {file_uri});
-        for (Zone& zone : kw_zones)
-        {
-          Zone line_range = range.line_range;
-          bool is_overlapping = (line_range.start <= zone.end) && (line_range.end >= zone.start);
-          if (is_overlapping)
-          {
-            u32 range_length = change["rangeLength"].get_uint32();
-            std::string_view text = change["text"].get_string();
-            perform_changes(range, range_length, text);
-          }
-        }
-      } catch (const std::out_of_range&)
-      {
-        continue;
-      }
-    }
+
+    std::stringstream full_text {std::string {file_changes.at(0).find_field("text").get_string().value()}};
+    src_lines.clear();
+    std::string line;
+    while (std::getline(full_text, line)) src_lines.emplace_back(line);
+
+    std::vector<std::string> keywords{"buildInputs", "nativeBuildInputs", "packages"};
+    scan_for_keywords(std::string{file_uri}, keywords);
   } catch (const std::exception& e)
   {
-    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    std::cerr << "[SYNC ERROR] " <<e.what()<<std::endl;
   }
 }
 
@@ -715,7 +678,12 @@ Zone search_for_bounds (i32 search_start_pos, std::string_view search_line)
   };
 }
 
-std::optional<Zone> zone_from_char_pos (std::string_view file_uri, auto &hover_loc, bool search_both=true, bool left_search=true)
+std::optional<Zone> zone_from_char_pos (
+    std::string_view file_uri,
+    auto &hover_loc,
+    bool search_both=true,
+    bool left_search=true
+    )
 {
   i32 line = hover_loc["line"].get_int32();
   i32 character = hover_loc["character"].get_int32();
@@ -755,7 +723,6 @@ std::optional<Zone> zone_from_char_pos (std::string_view file_uri, auto &hover_l
 
 void handle_lsp_completion (auto &json_obj)
 {
-  std::cerr<<"COMPLETION REQUEST RECEIVED"<<std::flush;
   auto id = json_obj["id"];
   JsonValue id_value {};
   try
@@ -800,7 +767,7 @@ void handle_lsp_completion (auto &json_obj)
       trimmed_lookup_value = lookup.substr(i);
       break;
     }
-    std::string sql {"SELECT * FROM pkgs WHERE csname LIKE ?"};
+    std::string sql {"SELECT csname, version, set_prefix, desc FROM pkgs WHERE csname LIKE ?"};
     std::string pkg_set {};
     size_t idx = trimmed_lookup_value.find('.');
     if (idx != std::string::npos)
@@ -809,7 +776,7 @@ void handle_lsp_completion (auto &json_obj)
       sql.append(" AND set_prefix LIKE ?");
       trimmed_lookup_value = trimmed_lookup_value.substr(idx+1);
     }
-    sql.append(" LIMIT 15");
+    sql.append(" LIMIT 30");
 
     response_obj.insert_or_assign("result", JsonValue {std::monostate {}});
     SQLite::Database db {stable_db.string(), SQLite::OPEN_READWRITE};
@@ -819,36 +786,45 @@ void handle_lsp_completion (auto &json_obj)
     JsonArray items {};
     while (query.executeStep())
     {
-      //   0     1     2       3        4
-      // name  csname ver  set_prefix  desc
-      std::string name =    query.getColumn(1);
-      std::string version = query.getColumn(2);
-      std::string set_pref = query.getColumn(3);
-      std::string desc =    query.getColumn(4);
+      //   0     1       2        3
+      // csname ver  set_prefix  desc
+      std::string name =    query.getColumn(0);
+      std::string version = query.getColumn(1);
+      std::string set_pref = query.getColumn(2);
+      std::string desc =    query.getColumn(3);
+      std::string full_name {};
+      if (!set_pref.empty()) full_name = set_pref + "." + name;
+      else full_name = name;
+
       JsonObject item {
-        {"label", JsonValue {name}},
+        {"label", JsonValue {full_name}},
         {"kind", JsonValue {3}},
-        {"detail", JsonValue {" v" + version + " (" + set_pref + ")"}},
+        {"detail", JsonValue {" v" + version}},
         {"documentation", JsonValue {desc}},
       };
       items.emplace_back (item);
     }
 
-    if (!items.empty())
-    {
-      JsonObject result {};
-      result.insert({"isIncomplete", JsonValue {false}});
-      result.insert({"items", JsonValue {items}});
-      response_obj.insert_or_assign("result", JsonValue {result});
-    }
+    JsonObject result {};
+    result.insert({"isIncomplete", JsonValue {true}});
+    result.insert({"items", JsonValue {items}});
+    response_obj.insert_or_assign("result", JsonValue {result});
+
     stringified.clear();
     std::invoke(output, response_obj, stringified);
   } catch (const std::exception& e)
   {
-    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    std::cerr << "[CMP ERROR] " <<e.what()<<std::endl;
     send_null_response(std::get<std::string>(id_value.value));
   }
 }
+
+auto rtrim = [] (std::string str)
+{
+  auto last_non_space = str.find_last_not_of(' ');
+  if (last_non_space == std::string::npos) return std::string("");
+  return str.substr(0, last_non_space+1);
+};
 
 void handle_lsp_hover(auto &json_obj)
 {
@@ -894,6 +870,7 @@ void handle_lsp_hover(auto &json_obj)
       trimmed_lookup_value = lookup.substr(i);
       break;
     }
+    trimmed_lookup_value = rtrim(trimmed_lookup_value);
 
     size_t idx = trimmed_lookup_value.rfind('.');
     std::string pkg_set_prefix {};
@@ -905,19 +882,23 @@ void handle_lsp_hover(auto &json_obj)
 
     response_obj.insert_or_assign("result", JsonValue {std::monostate {}});
     SQLite::Database db {stable_db.string(), SQLite::OPEN_READWRITE};
-    std::string sql =  "SELECT * FROM pkgs WHERE csname = ?";
-    if (!pkg_set_prefix.empty()) sql += " AND set_prefix = ?";
+    std::string sql = "SELECT csname, version, set_prefix, desc FROM pkgs"
+                      " WHERE csname = ?";
+    if (pkg_set_prefix.empty()) sql += " AND set_prefix IS NULL";
+    else sql += " AND set_prefix = ?";
 
     SQLite::Statement query {db, sql};
     query.bind(1, trimmed_lookup_value);
+    if (!pkg_set_prefix.empty()) query.bind(2, pkg_set_prefix);
+
     if (query.executeStep())
     {
-      //   0     1      2       3        4
-      // name  csname  ver  set_prefix  desc
-      std::string name =    query.getColumn(1);
-      std::string version = query.getColumn(2);
-      std::string set_pref = query.getColumn(3);
-      std::string desc =    query.getColumn(4);
+      //    1      2       3        4
+      // csname  ver  set_prefix  desc
+      std::string name =    query.getColumn(0);
+      std::string version = query.getColumn(1);
+      std::string set_pref = query.getColumn(2);
+      std::string desc =    query.getColumn(3);
       std::string md = "{} [**v{}**]\n**{}**\n{}";
       JsonObject result {};
       if (!set_pref.empty()) set_pref = "(" + set_pref + ")";
@@ -935,7 +916,7 @@ void handle_lsp_hover(auto &json_obj)
     std::invoke(output, response_obj, stringified);
   } catch (const std::exception& e)
   {
-    std::cerr << "[ERROR] " <<e.what()<<std::endl;
+    std::cerr << "[HOVER ERROR] " <<e.what()<<std::endl;
     send_null_response(std::get<std::string>(id_value.value));
   }
 }
