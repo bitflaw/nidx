@@ -16,9 +16,9 @@
           clang-tools
           gf
         ];
-        buildInputs = with pkgs; [
-          sqlite
-          sqlitecpp
+        buildInputs = [
+          pkgs.sqlite
+          pkgs.sqlitecpp
         ];
         shellHook = ''
           export SHELL="${pkgs.bashInteractive}/bin/bash"
