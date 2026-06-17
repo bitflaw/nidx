@@ -26,7 +26,7 @@ namespace sjod = simdjson::ondemand;
 struct Version
 {
   static constexpr u32 major = 0;
-  static constexpr u32 minor = 0;
+  static constexpr u32 minor = 1;
   static constexpr u32 patch = 0;
 
   static std::string string()
@@ -211,7 +211,7 @@ void usage(std::string_view pname)
   std::string usage_str =
       "Usage: {}\n\t[-h help] [-v version] [-l enable lsp-mode] [-p package(s)]\n\t"
       "[-s package set ] [-S case-sensitive search][-e enable exact matching]\n\t"
-      "[-U {{stable|unstable|both}} update pkg index] [-u search unstable too]\n";
+      "[-U {{stable|unstable|both}} update pkg index] [-u include unstable results]";
 
   std::cout << std::vformat(usage_str, std::make_format_args(pname))
             << std::endl;
@@ -222,28 +222,28 @@ void query_pkgs(std::vector<std::string> &target_pkgs, std::string &pkg_set, Que
   std::string name_column_to_use {"name"};
   if (q_opts.case_sensitive_search) name_column_to_use = "csname";
 
+  size_t n = target_pkgs.size();
   std::string partial {};
   if (q_opts.enable_exact_matching)
   {
     partial += name_column_to_use + " IN (";
-    for (size_t i = 0; i < target_pkgs.size(); i++)
+    for (size_t i = 0; i < n; i++)
       partial += (i == 0 ? "?" : ", ?");
   } else
   {
     partial += "(";
-    for (size_t i = 0; i < target_pkgs.size(); i++)
+    for (size_t i = 0; i < n; i++)
     {
       partial += name_column_to_use + " LIKE ?";
-      if (i < target_pkgs.size() - 1)
+      if (i < (n - 1))
         partial += " OR ";
     }
   }
   partial += ")";
-  if (!pkg_set.empty()) partial += " AND set_prefix LIKE ? ";
+  if (!pkg_set.empty()) partial += " AND set_prefix LIKE ?";
 
   std::string query = "SELECT csname, version, set_prefix, desc, '{}' as branch"
-                      " FROM {}pkgs WHERE " +
-                      partial;
+                      " FROM {}pkgs WHERE " + partial;
   std::string ovr = "SELECT * FROM (";
   ovr += std::vformat(query, std::make_format_args("S", "main."));
 
@@ -259,42 +259,49 @@ void query_pkgs(std::vector<std::string> &target_pkgs, std::string &pkg_set, Que
     {
       std::cerr << e.what() << std::endl;
     }
-    ovr += " UNION ALL " +
-           std::vformat(query, std::make_format_args("U", "unstable."));
+    ovr += " UNION ALL " + std::vformat(query, std::make_format_args("U", "unstable."));
   }
   ovr += ") LIMIT 50;";
 
   SQLite::Statement stmt{db_stable, ovr};
 
-  size_t n = target_pkgs.size();
+  bool ps_empty = pkg_set.empty();
+  size_t unstable_bind_idx {0};
   if (q_opts.enable_exact_matching)
     for (size_t i = 0; i < n; i++)
     {
       stmt.bind(i + 1, target_pkgs[i]);
       if (q_opts.use_unstable)
-        stmt.bind((i + 1) + n, target_pkgs[i]);
+      {
+        unstable_bind_idx = ps_empty ? (i + 1) + n: (i + 2) + n;
+        stmt.bind(unstable_bind_idx, target_pkgs[i]);
+      }
     }
   else
     for (size_t i = 0; i < n; i++)
     {
       stmt.bind(i + 1, target_pkgs[i] + "%");
       if (q_opts.use_unstable)
-        stmt.bind((i + 1) + n, target_pkgs[i] + "%");
+      {
+        unstable_bind_idx = ps_empty ? (i + 1) + n: (i + 2) + n;
+        stmt.bind(unstable_bind_idx, target_pkgs[i]+"%");
+      }
     }
-  if (!pkg_set.empty())
+  if (!ps_empty)
   {
-    stmt.bind(target_pkgs.size() + 1, pkg_set + "%");
-    stmt.bind((n + 1) + n, pkg_set + "%");
+    stmt.bind(n + 1, pkg_set + "%");
+    if (q_opts.use_unstable) stmt.bind(2*n + 2, pkg_set + "%");
   }
+
   try
   {
-    size_t count = 0;
-    std::string connector = "  \u2570\u2500\u2500 "; // "  ╰─── ";
+    size_t count {0};
+    std::string connector {"  \u2570\u2500\u2500 "}; // "  ╰─── ";
     std::cout << "\n";
     std::string pkg_col, branch, pkg_set, pkg_set_out, desc, desc_out, ver, ver_out;
     while (stmt.executeStep())
     {
-      //   0      1       2      3      4
+      //    0     1       2      3      4
       // csname  ver  set_pref  desc  branch
       ver     = stmt.getColumn(1).getString();
       pkg_set = stmt.getColumn(2).getString();

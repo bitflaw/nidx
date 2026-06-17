@@ -1,5 +1,5 @@
 {
-  description = "Nix Packages Indexer";
+  description = "Nix Packages Indexer (and LSP server).";
   inputs = {
     nixpkgs.url = "nixpkgs/nixos-25.11";
   };
@@ -10,11 +10,36 @@
       pkgs = import nixpkgs { inherit system; };
     in
     {
+      packages.${system} = rec {
+        nidx = pkgs.stdenv.mkDerivation {
+          pname = "nidx";
+          version = "0.1.0";
+          src = ./.;
+
+          nativeBuildInputs = [ pkgs.cmake ];
+          buildInputs = [
+            pkgs.sqlite
+            pkgs.sqlitecpp
+          ];
+          cmakeFlags = [
+            "-DCMAKE_BUILD_TYPE=Release"
+          ];
+
+          meta = with pkgs.lib; {
+            description = "Nix Packages Indexer (and LSP server).";
+            homepage = "https://github.com/bitflaw/nidx";
+            license = licenses.gpl3Plus;
+            maintainers = [ ];
+            platforms = platforms.linux;
+          };
+        };
+        default = nidx;
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         nativeBuildInputs = with pkgs; [
           cmake
           clang-tools
-          gf
         ];
         buildInputs = [
           pkgs.sqlite
