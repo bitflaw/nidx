@@ -91,12 +91,20 @@ Below are some demos on how this looks:
 - [ ] Incremental parsing -> I already have tree-sitter integrated, so one would think that this would be a trivial task, but no, so I will try again later
 - [ ] Support for both channels (stable and unstable) as they can be used side by side in nix files, eg flake inputs.
 - [ ] More Zone coverage, IE identifying where packages are defined or used in files, and adding them as zones in the lsp server, which will then provide completion and hover capability for them.
-
+> [!Note]
+> `nidx` provides completion and hover capabilities based on a fast local index of upstream nixpkgs channels. It does not evaluate dynamic local configurations, inline overlays and/or custom packages defined within the local workspace/file (yet, maybe).
 
 ### More Examples
-
-![Query package without pkgset](./demo/query_package_without_pkg_set.png)
-![Query with pkgset](./demo/filter_by_pkg_set.png)
-![Query multiple packages](./demo/query_multiple_packages.png)
-![Include unstable results](./demo/include_unstable_results.png)
-![Query an exact match](./demo/query_an_exact_match.png)
+<table>
+    <tr>
+        <td><img src="./demo/query_package_without_pkg_set.png"></td>
+        <td><img src="./demo/filter_by_pkg_set.png"></td>
+    </tr>
+    <tr>
+        <td><img src="./demo/include_unstable_results.png"></td>
+        <td><img src="./demo/query_an_exact_match.png"></td>
+    </tr>
+     <tr>
+        <td><img src="./demo/query_multiple_packages.png"></td>
+    </tr>
+</table>
