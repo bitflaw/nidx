@@ -3,8 +3,12 @@ This is a Nix Packages Indexer (Nix Index) providing querying of packages for bo
 
 It provides
 - Fine-tuned search for packages in either/both of the stable and unstable channels of nixpkgs through various flags, shown below
-- Lsp Completion and hover support, but only for stable channel(unstable support not impl'd).
+- LSP Completion and hover support, but only for stable channel(unstable support not impl'd).
 - Updates to both channels easily (checkout the `Usage` below)
+> [!Note]
+> `nidx` provides completion and hover capabilities based on a fast local index of upstream nixpkgs channels. It does not evaluate dynamic local configurations, inline overlays and/or custom packages defined within the local workspace/file.
+>
+> It basically is just [search.nixos.org](search.nixos.org) brought to the editor and CLI with speed.
 
 ## Installation
 Run directly:
@@ -91,8 +95,6 @@ Below are some demos on how this looks:
 - [ ] Incremental parsing -> I already have tree-sitter integrated, so one would think that this would be a trivial task, but no, so I will try again later
 - [ ] Support for both channels (stable and unstable) as they can be used side by side in nix files, eg flake inputs.
 - [ ] More Zone coverage, IE identifying where packages are defined or used in files, and adding them as zones in the lsp server, which will then provide completion and hover capability for them.
-> [!Note]
-> `nidx` provides completion and hover capabilities based on a fast local index of upstream nixpkgs channels. It does not evaluate dynamic local configurations, inline overlays and/or custom packages defined within the local workspace/file (yet, maybe).
 
 ### More Examples
 <table>
